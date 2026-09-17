@@ -712,7 +712,7 @@ with tab2:
 
         st.dataframe(filtered_meta[["Огноо", "Архивласан", "Мөрийн тоо"]], use_container_width=True, hide_index=True)
 
-        record_options = {f'{r["Огноо"]} — {r["id"][:8]}': r["id"] for r in history
+        record_options = {f'{r["date"]} — {r["id"][:8]}': r["id"] for r in history
                            if sel_month == "Бүгд" or str(r["date"])[:7] == sel_month}
 
         if record_options:

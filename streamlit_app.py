@@ -9,6 +9,27 @@
 Ажиллуулах:
     streamlit run app.py
 =======================================================================================
+
+Энэ хувилбарт орсон гол засвар / сайжруулалтууд:
+  1. clean_code: тэргүүн тэгтэй код (жишээ нь "007") устгагдахгүй болсон.
+  2. parse_system_excel: Нэр багана олдоогүй тохиолдолд бүх мөрийг санамсаргүй
+     хаяхгүй болсон (зөвхөн Нэр багана байгаа үед л хоосон нэрийг шүүнэ).
+  3. Хайлтын талбарууд (search) regex мэт тэмдэгтээс болж crash хийхгүй болсон
+     (regex=False).
+  4. pandas-ийн шинэ хувилбарт .applymap deprecated тул .map руу шилжиж,
+     хуучин хувилбартай нийцтэй байлгах fallback нэмэгдсэн.
+  5. JSON файл бичихдээ түр файл руу бичээд атомаар сольж хадгалдаг болсон
+     (os.replace) — апп гэнэт унасан ч өгөгдөл эвдрэхгүй.
+  6. Устгах/цэвэрлэх мэт эргэлт буцалтгүй үйлдлүүдэд 2 дахь баталгаажуулах
+     алхам (checkbox) нэмэгдсэн.
+  7. Тулгалтын үр дүнд "Тоолоогүй ч Системд зарагдсан" бараануудыг тусад нь
+     харуулдаг болсон.
+  8. Код баганыг чөлөөт бичих Text талбар болгож, мастер жагсаалтаас
+     автоматаар нэр бөглөх санал (autofill) хэвээр үлдсэн — гэхдээ
+     сонголтоор хязгаарлагдахгүй.
+  9. Fuzzy тулгалтын босго (threshold) sidebar-аас тохируулах боломжтой болсон.
+  10. load_master/load_json-д хөнгөн кэш нэмэгдсэн, хадгалах бүрд цэвэрлэдэг.
+=======================================================================================
 """
 
 import streamlit as st
@@ -17,7 +38,9 @@ import numpy as np
 import json
 import os
 import io
+import re
 import uuid
+import tempfile
 from datetime import datetime, date
 
 try:
@@ -45,7 +68,7 @@ PATH_CURRENT = os.path.join(DATA_DIR, "inventory_current.json")
 PATH_HISTORY = os.path.join(DATA_DIR, "inventory_history.json")
 PATH_DELETED = os.path.join(DATA_DIR, "inventory_deleted.json")
 
-FUZZY_THRESHOLD = 70  # Нэрээр тулгах босго оноо (0-100)
+DEFAULT_FUZZY_THRESHOLD = 70  # Нэрээр тулгах босго оноо (0-100)
 
 # ---- Responsive / хөнгөн загвар (CSS) ----
 st.markdown(
@@ -79,7 +102,7 @@ st.markdown(
 
 
 # =======================================================================================
-# 1. JSON DB ТУСЛАХ ФУНКЦУУД (UTF-8 бүрэн дэмжинэ)
+# 1. JSON DB ТУСЛАХ ФУНКЦУУД (UTF-8 бүрэн дэмжинэ, атомаар бичнэ)
 # =======================================================================================
 def load_json(path: str, default):
     if not os.path.exists(path):
@@ -96,11 +119,26 @@ def load_json(path: str, default):
 
 
 def save_json(path: str, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """
+    Атомаар бичих: эхлээд түр файл руу бичээд, амжилттай бол os.replace-ээр
+    жинхэнэ файлыг сольно. Апп ажиллаж байх үед унтарсан/crash хийсэн ч
+    хуучин файл эвдрэхгүй байх нөхцлийг хангана.
+    """
+    folder = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
-def load_master() -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def _load_master_cached(mtime):
+    """mtime-г кэш түлхүүр болгон ашигладаг тул файл өөрчлөгдвөл автоматаар дахин уншина."""
     data = load_json(PATH_MASTER, [])
     if not data:
         return pd.DataFrame(columns=["Код", "Нэр"])
@@ -113,10 +151,16 @@ def load_master() -> pd.DataFrame:
     return df[["Код", "Нэр"]].astype(str)
 
 
+def load_master() -> pd.DataFrame:
+    mtime = os.path.getmtime(PATH_MASTER) if os.path.exists(PATH_MASTER) else 0
+    return _load_master_cached(mtime).copy()
+
+
 def save_master(df: pd.DataFrame):
     records = [{"code": str(r["Код"]).strip(), "name": str(r["Нэр"]).strip()} for _, r in df.iterrows()
                if str(r["Код"]).strip() != ""]
     save_json(PATH_MASTER, records)
+    _load_master_cached.clear()
 
 
 def empty_count_row():
@@ -166,10 +210,17 @@ def find_header_row(raw_df: pd.DataFrame, max_scan: int = 25) -> int:
 
 
 def clean_code(val) -> str:
-    """Тоон код 465.0 маягаар унших асуудлыг засаж '465' болгоно."""
+    """
+    Тоон код 465.0 маягаар унших асуудлыг засаж '465' болгоно.
+    Харин '007', '0012' зэрэг ЗОРИУД тэргүүн тэгтэй кодыг ХЭВЭЭР үлдээнэ
+    (өмнөх хувилбарт эдгээр тэг устаж алдаа гарч байсныг засав).
+    """
     s = str(val).strip()
     if s.lower() in ("nan", "none", ""):
         return ""
+    # "0"-ээр эхэлсэн, зөвхөн тооноос бүрдсэн мөрийг тэр чигт нь хадгална
+    if re.fullmatch(r"0\d+", s):
+        return s
     try:
         f = float(s)
         if f.is_integer():
@@ -184,7 +235,7 @@ def parse_system_excel(uploaded_file) -> pd.DataFrame:
     Системийн Excel-ийг уншиж (Код, Нэр, Систем) баганатай нормчилно.
     - Толгой мөр өөр газар байх (ж: эхэнд огноо мөр) тохиолдлыг автоматаар илрүүлнэ.
     - "Item #"/"Item Name" зэрэг ойролцоо нэртэй баганыг зөв ялгана.
-    - Дэд нийлбэр / хоосон мөрүүдийг (Нэр хоосон байдаг) шүүж хаяна.
+    - Дэд нийлбэр / хоосон мөрүүдийг шүүж хаяна (ЗӨВХӨН Нэр багана байгаа үед).
     - Ижил Код/Нэр давхар мөрөөр орж ирвэл (тайланд нэг бараа хэд хэдэн бүлэгт
       гарч ирдэг) тоог нь нэгтгэж нэмнэ.
     """
@@ -213,9 +264,12 @@ def parse_system_excel(uploaded_file) -> pd.DataFrame:
     out["Нэр"] = df_raw[name_col].astype(str).str.strip() if name_col else ""
     out["Систем"] = pd.to_numeric(df_raw[qty_col], errors="coerce")
 
-    # Дэд нийлбэр / хоосон (спэйсэр) мөрүүдийг хасах — эдгээрт Нэр хоосон байдаг
-    out["Нэр"] = out["Нэр"].replace({"nan": "", "None": ""})
-    out = out[out["Нэр"].str.strip() != ""]
+    # Дэд нийлбэр / хоосон (спэйсэр) мөрүүдийг хасах — ЗӨВХӨН Нэр багана
+    # бодитоор байгаа тохиолдолд (үгүй бол бүх мөрийг санамсаргүй хаяж болзошгүй).
+    if name_col:
+        out["Нэр"] = out["Нэр"].replace({"nan": "", "None": ""})
+        out = out[out["Нэр"].str.strip() != ""]
+
     out = out.dropna(subset=["Систем"])
 
     if out.empty:
@@ -230,7 +284,7 @@ def parse_system_excel(uploaded_file) -> pd.DataFrame:
     return out
 
 
-def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame) -> pd.DataFrame:
+def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame, fuzzy_threshold: int) -> pd.DataFrame:
     """
     Код-оор эхлээд тулгана, олдохгүй бол Fuzzy search-ээр нэрээр тулгана.
     Зөрүү = Бодит - Систем
@@ -254,6 +308,7 @@ def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame) -> pd.DataFrame:
 
     system_qty_list = []
     match_method_list = []
+    matched_keys = set()  # системийн аль мөрүүд тулгагдсаныг мөшгих (Код эсвэл Нэр)
 
     for _, row in df.iterrows():
         code = str(row.get("Код", "")).strip()
@@ -265,12 +320,14 @@ def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame) -> pd.DataFrame:
         if code and code in code_map:
             sys_qty = code_map[code]
             method = "Код"
+            matched_keys.add(("code", code))
         # 2) Fuzzy search — нэрээр тулгах
         elif name and system_names:
             best = process.extractOne(name, system_names, scorer=fuzz.token_sort_ratio)
-            if best and best[1] >= FUZZY_THRESHOLD:
+            if best and best[1] >= fuzzy_threshold:
                 sys_qty = name_map[best[0]]
                 method = f"Fuzzy ({best[1]}%) → {best[0]}"
+                matched_keys.add(("name", best[0]))
 
         if sys_qty is None:
             sys_qty = 0.0
@@ -281,6 +338,19 @@ def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame) -> pd.DataFrame:
     df["Систем"] = system_qty_list
     df["Тулгасан аргаас"] = match_method_list
     df["Зөрүү"] = df["Бодит"] - df["Систем"]
+
+    # Тоолоогүй ч Системд байгаа (алгассан) мөрүүдийг тэмдэглэх
+    unmatched_rows = []
+    for _, r in df_system.iterrows():
+        code = str(r.get("Код", "")).strip()
+        name = str(r.get("Нэр", "")).strip()
+        if ("code", code) in matched_keys or ("name", name) in matched_keys:
+            continue
+        unmatched_rows.append({"Код": code, "Нэр": name, "Систем": r["Систем"]})
+
+    df.attrs["unmatched_system"] = pd.DataFrame(unmatched_rows) if unmatched_rows else pd.DataFrame(
+        columns=["Код", "Нэр", "Систем"]
+    )
     return df
 
 
@@ -302,7 +372,11 @@ def styled_table(df: pd.DataFrame, diff_col="Зөрүү"):
     view = df[cols] if cols else df
     sty = view.style
     if diff_col in view.columns:
-        sty = sty.applymap(color_diff, subset=[diff_col])
+        # pandas >=2.1: Styler.map; хуучин хувилбарт applymap ашиглана.
+        try:
+            sty = sty.map(color_diff, subset=[diff_col])
+        except AttributeError:
+            sty = sty.applymap(color_diff, subset=[diff_col])
     fmt = {c: "{:.1f}" for c in ["Өглөө", "Хүргэлт", "Орой", "Бодит", "Систем", "Зөрүү"] if c in view.columns}
     sty = sty.format(fmt)
     return sty
@@ -338,6 +412,18 @@ if "count_df" not in st.session_state:
 if "reconciled_df" not in st.session_state:
     st.session_state.reconciled_df = None
 
+if "unmatched_system_df" not in st.session_state:
+    st.session_state.unmatched_system_df = None
+
+if "confirm_clear_table" not in st.session_state:
+    st.session_state.confirm_clear_table = False
+
+if "confirm_delete_id" not in st.session_state:
+    st.session_state.confirm_delete_id = None
+
+if "fuzzy_threshold" not in st.session_state:
+    st.session_state.fuzzy_threshold = DEFAULT_FUZZY_THRESHOLD
+
 
 # =======================================================================================
 # 4. HEADER
@@ -366,10 +452,10 @@ with tab1:
         count_date = st.date_input("Тооллогын огноо", value=date.today())
 
     master_df = load_master()
-    code_options = [""] + master_df["Код"].tolist() if not master_df.empty else [""]
     code_to_name = dict(zip(master_df["Код"], master_df["Нэр"])) if not master_df.empty else {}
 
     st.caption("Мөр бүрт Өглөө / Хүргэлт (Орлого) / Орой-ийн тоог оруулна уу. "
+               "Код бичихэд мастер жагсаалтад байгаа бол нэр автоматаар бөглөгдөнө. "
                "Шинэ мөр нэмэхдээ хүснэгтийн доод хэсгийн **+** товч ашиглана.")
 
     edited_df = st.data_editor(
@@ -378,9 +464,7 @@ with tab1:
         use_container_width=True,
         key="count_editor",
         column_config={
-            "Код": st.column_config.SelectboxColumn(
-                "Код (PLU)", options=code_options, required=False, width="small"
-            ) if code_options and len(code_options) > 1 else st.column_config.TextColumn("Код", width="small"),
+            "Код": st.column_config.TextColumn("Код (PLU)", width="small"),
             "Нэр": st.column_config.TextColumn("Барааны нэр", width="medium"),
             "Өглөө": st.column_config.NumberColumn("Өглөө (Ө)", min_value=0.0, step=1.0, format="%.1f"),
             "Хүргэлт": st.column_config.NumberColumn("Хүргэлт/Орлого (Х)", min_value=0.0, step=1.0, format="%.1f"),
@@ -390,11 +474,12 @@ with tab1:
         hide_index=True,
     )
 
-    # Код сонговол нэрийг автоматаар бөглөх
+    # Код бичвэл нэрийг автоматаар бөглөх (Нэр хоосон үед л дарж бичихгүй байхаар)
     if not master_df.empty:
         for i in edited_df.index:
             c = str(edited_df.at[i, "Код"]).strip()
-            if c and c in code_to_name:
+            existing_name = str(edited_df.at[i, "Нэр"]).strip()
+            if c and c in code_to_name and not existing_name:
                 edited_df.at[i, "Нэр"] = code_to_name[c]
 
     st.session_state.count_df = edited_df
@@ -423,14 +508,35 @@ with tab1:
             })
             st.success("Түр хадгаллаа. Дараа нэвтрэхэд энэ өгөгдөл сэргэнэ.")
     with col_save2:
-        if st.button("🗑️ Хүснэгтийг цэвэрлэх", use_container_width=True):
-            st.session_state.count_df = pd.DataFrame([empty_count_row()])
-            st.session_state.reconciled_df = None
-            st.rerun()
+        if not st.session_state.confirm_clear_table:
+            if st.button("🗑️ Хүснэгтийг цэвэрлэх", use_container_width=True):
+                st.session_state.confirm_clear_table = True
+                st.rerun()
+        else:
+            st.warning("Хүснэгтэд байгаа бүх өгөгдөл устна. Итгэлтэй байна уу?")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("✅ Тийм, цэвэрлэ", type="primary", use_container_width=True):
+                st.session_state.count_df = pd.DataFrame([empty_count_row()])
+                st.session_state.reconciled_df = None
+                st.session_state.unmatched_system_df = None
+                st.session_state.confirm_clear_table = False
+                st.rerun()
+            if cc2.button("❌ Үгүй, болих", use_container_width=True):
+                st.session_state.confirm_clear_table = False
+                st.rerun()
 
     st.divider()
     st.subheader("🔄 Системийн Excel-тэй тулгах")
     st.caption("Excel файл нь `Код`/`ID`, `Нэр`(заавал биш) болон **`Qty Sold`** баганатай байх ёстой.")
+
+    fuzzy_threshold = st.slider(
+        "Нэрээр тулгах Fuzzy босго (%)",
+        min_value=40, max_value=100,
+        value=st.session_state.fuzzy_threshold,
+        help="Код тулгагдаагүй үед нэрээр ойролцоо тааруулах босго оноо. "
+             "Бага утга — илүү чөлөөтэй тааруулна (алдаа гарах магадлал ихэснэ).",
+    )
+    st.session_state.fuzzy_threshold = fuzzy_threshold
 
     sys_file = st.file_uploader("Системийн борлуулалтын Excel файл", type=["xlsx", "xls"], key="sys_upload")
 
@@ -439,8 +545,9 @@ with tab1:
             df_system = parse_system_excel(sys_file)
             st.success(f"Системийн файлаас {len(df_system)} мөр амжилттай уншлаа.")
             if st.button("⚖️ Тулгалт хийх", type="primary", use_container_width=True):
-                reconciled = reconcile(edited_df, df_system)
+                reconciled = reconcile(edited_df, df_system, fuzzy_threshold)
                 st.session_state.reconciled_df = reconciled
+                st.session_state.unmatched_system_df = reconciled.attrs.get("unmatched_system")
         except Exception as e:
             st.error(f"Файл уншихад алдаа гарлаа: {e}")
 
@@ -454,6 +561,12 @@ with tab1:
         d2.metric("Илүүдсэн барааны тоо", int((rdf["Зөрүү"] > 0).sum()))
         d3.metric("Тохирсон барааны тоо", int((rdf["Зөрүү"] == 0).sum()))
 
+        unmatched_sys = st.session_state.unmatched_system_df
+        if unmatched_sys is not None and not unmatched_sys.empty:
+            with st.expander(f"⚠️ Тоолоогүй ч Системд зарагдсан бараа ({len(unmatched_sys)})", expanded=False):
+                st.caption("Эдгээр бараа тооллогын хүснэгтэд байхгүй эсвэл нэр/код таарахгүй байна.")
+                st.dataframe(unmatched_sys, use_container_width=True, hide_index=True)
+
         if st.button("📦 Архивлах (Тулгалтыг баталгаажуулж хадгалах)", type="primary", use_container_width=True):
             history = load_json(PATH_HISTORY, [])
             record = {
@@ -461,6 +574,7 @@ with tab1:
                 "date": count_date.strftime("%Y-%m-%d"),
                 "archived_at": datetime.now().isoformat(),
                 "items": rdf.to_dict(orient="records"),
+                "unmatched_system": unmatched_sys.to_dict(orient="records") if unmatched_sys is not None else [],
             }
             history.append(record)
             save_json(PATH_HISTORY, history)
@@ -469,6 +583,7 @@ with tab1:
             save_json(PATH_CURRENT, {"date": "", "items": [], "saved_at": ""})
             st.session_state.count_df = pd.DataFrame([empty_count_row()])
             st.session_state.reconciled_df = None
+            st.session_state.unmatched_system_df = None
             st.success(f"{count_date.strftime('%Y-%m-%d')} өдрийн тооллого архивлагдлаа!")
             st.rerun()
 
@@ -514,6 +629,11 @@ with tab2:
             else:
                 st.dataframe(rdf, use_container_width=True, hide_index=True)
 
+            unmatched_hist = pd.DataFrame(sel_record.get("unmatched_system", []))
+            if not unmatched_hist.empty:
+                with st.expander(f"⚠️ Тухайн өдөр тоолоогүй ч Системд зарагдсан бараа ({len(unmatched_hist)})"):
+                    st.dataframe(unmatched_hist, use_container_width=True, hide_index=True)
+
             c1, c2 = st.columns(2)
             with c1:
                 excel_bytes = df_to_excel_bytes(rdf, sheet_name=sel_record["date"])
@@ -525,42 +645,52 @@ with tab2:
                     use_container_width=True,
                 )
             with c2:
-                if st.button("🗑️ Устгах (Хогийн саванд шилжүүлэх)", use_container_width=True):
-                    history = [r for r in history if r["id"] != sel_id]
-                    sel_record["deleted_at"] = datetime.now().isoformat()
-                    deleted.append(sel_record)
-                    save_json(PATH_HISTORY, history)
-                    save_json(PATH_DELETED, deleted)
-                    st.warning("Тайланг хогийн саванд шилжүүллээ.")
-                    st.rerun()
+                if st.session_state.confirm_delete_id != sel_id:
+                    if st.button("🗑️ Устгах (Хогийн саванд шилжүүлэх)", use_container_width=True):
+                        st.session_state.confirm_delete_id = sel_id
+                        st.rerun()
+                else:
+                    st.warning("Энэ тайланг хогийн саванд шилжүүлэх үү?")
+                    dc1, dc2 = st.columns(2)
+                    if dc1.button("✅ Тийм", type="primary", use_container_width=True, key="confirm_del_yes"):
+                        history = [r for r in history if r["id"] != sel_id]
+                        sel_record["deleted_at"] = datetime.now().isoformat()
+                        deleted.append(sel_record)
+                        save_json(PATH_HISTORY, history)
+                        save_json(PATH_DELETED, deleted)
+                        st.session_state.confirm_delete_id = None
+                        st.warning("Тайланг хогийн саванд шилжүүллээ.")
+                        st.rerun()
+                    if dc2.button("❌ Үгүй", use_container_width=True, key="confirm_del_no"):
+                        st.session_state.confirm_delete_id = None
+                        st.rerun()
 
             # Сарын нэгтгэл
-            if "Зөрүү" in filtered_meta.columns or True:
-                st.divider()
-                st.write("### 📈 Сарын нэгтгэл")
-                all_month_items = []
-                for r in history:
-                    if sel_month == "Бүгд" or str(r["date"])[:7] == sel_month:
-                        for item in r.get("items", []):
-                            item = dict(item)
-                            item["Огноо"] = r["date"]
-                            all_month_items.append(item)
-                if all_month_items:
-                    month_df = pd.DataFrame(all_month_items)
-                    if "Зөрүү" in month_df.columns:
-                        summary = month_df.groupby("Нэр", dropna=False).agg(
-                            Бодит=("Бодит", "sum"),
-                            Систем=("Систем", "sum"),
-                            Зөрүү=("Зөрүү", "sum"),
-                        ).reset_index()
-                        st.dataframe(styled_table(summary), use_container_width=True, hide_index=True)
-                        month_excel = df_to_excel_bytes(summary, sheet_name="Сарын_нэгтгэл")
-                        st.download_button(
-                            "⬇️ Сарын нэгтгэлийг Excel-ээр татах",
-                            data=month_excel,
-                            file_name=f"CaffeBene_saryn_negtgel_{sel_month}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        )
+            st.divider()
+            st.write("### 📈 Сарын нэгтгэл")
+            all_month_items = []
+            for r in history:
+                if sel_month == "Бүгд" or str(r["date"])[:7] == sel_month:
+                    for item in r.get("items", []):
+                        item = dict(item)
+                        item["Огноо"] = r["date"]
+                        all_month_items.append(item)
+            if all_month_items:
+                month_df = pd.DataFrame(all_month_items)
+                if "Зөрүү" in month_df.columns:
+                    summary = month_df.groupby("Нэр", dropna=False).agg(
+                        Бодит=("Бодит", "sum"),
+                        Систем=("Систем", "sum"),
+                        Зөрүү=("Зөрүү", "sum"),
+                    ).reset_index()
+                    st.dataframe(styled_table(summary), use_container_width=True, hide_index=True)
+                    month_excel = df_to_excel_bytes(summary, sheet_name="Сарын_нэгтгэл")
+                    st.download_button(
+                        "⬇️ Сарын нэгтгэлийг Excel-ээр татах",
+                        data=month_excel,
+                        file_name=f"CaffeBene_saryn_negtgel_{sel_month}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
 
     st.divider()
     with st.expander(f"🗑️ Хогийн сав ({len(deleted)})", expanded=False):
@@ -621,7 +751,8 @@ with tab3:
                 st.error("Файлд Код болон Нэр багана олдсонгүй.")
             else:
                 preview = df_bulk[[code_col, name_col]].rename(columns={code_col: "Код", name_col: "Нэр"})
-                preview = preview.astype(str)
+                preview["Код"] = preview["Код"].apply(clean_code)
+                preview["Нэр"] = preview["Нэр"].astype(str).str.strip()
                 st.dataframe(preview, use_container_width=True, hide_index=True)
                 if st.button("✅ Мастер жагсаалтад нэгтгэх", type="primary"):
                     merged = pd.concat([master_df, preview], ignore_index=True)
@@ -641,8 +772,8 @@ with tab3:
         search_q = st.text_input("🔍 Хайх (код эсвэл нэрээр)")
         show_df = master_df.copy()
         if search_q.strip():
-            mask = (show_df["Код"].str.contains(search_q, case=False, na=False) |
-                    show_df["Нэр"].str.contains(search_q, case=False, na=False))
+            mask = (show_df["Код"].str.contains(search_q, case=False, na=False, regex=False) |
+                    show_df["Нэр"].str.contains(search_q, case=False, na=False, regex=False))
             show_df = show_df[mask]
 
         edited_master = st.data_editor(

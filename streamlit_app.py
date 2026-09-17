@@ -284,6 +284,65 @@ def parse_system_excel(uploaded_file) -> pd.DataFrame:
     return out
 
 
+def parse_count_excel(uploaded_file) -> pd.DataFrame:
+    """
+    Хэрэглэгчийн бэлдсэн ТООЛЛОГЫН Excel файлыг уншиж (Код, Нэр, Өглөө, Хүргэлт,
+    Орой, Тайлбар) баганатай, count_df-тэй ижил бүтэцтэй болгож нормчилно.
+    - Толгой мөр өөр газар байх тохиолдлыг автоматаар илрүүлнэ (find_header_row).
+    - Код, Нэр заавал биш (аль нэг нь байхад хангалттай) — гэхдээ Өглөө/Хүргэлт/Орой
+      баганаас дор хаяж НЭГ нь байх шаардлагатай.
+    - Ижил Код/Нэр давхар мөрөөр орж ирвэл тоог нь нэгтгэж нэмнэ.
+    """
+    uploaded_file.seek(0)
+    raw = pd.read_excel(uploaded_file, engine="openpyxl", header=None)
+    header_row = find_header_row(raw)
+
+    uploaded_file.seek(0)
+    df_raw = pd.read_excel(uploaded_file, engine="openpyxl", header=header_row)
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+    code_col = find_col(df_raw.columns, ["код", "plu", "code", "id", "item #", "item#"])
+    name_col = find_col(df_raw.columns, ["нэр", "бараа", "name", "item name", "item"])
+    morning_col = find_col(df_raw.columns, ["өглөө", "morning"])
+    delivery_col = find_col(df_raw.columns, ["хүргэлт", "орлого", "delivery", "income"])
+    evening_col = find_col(df_raw.columns, ["орой", "evening"])
+    note_col = find_col(df_raw.columns, ["тайлбар", "note", "comment"])
+
+    if name_col is None and code_col is None:
+        raise ValueError("Тооллогын файлд Код эсвэл Нэр агуулсан багана олдсонгүй.")
+    if morning_col is None and delivery_col is None and evening_col is None:
+        raise ValueError(
+            "Тооллогын файлд Өглөө / Хүргэлт(Орлого) / Орой баганаас дор хаяж нэг нь олдсонгүй. "
+            "Файлын толгой мөрийг шалгана уу."
+        )
+
+    out = pd.DataFrame()
+    out["Код"] = df_raw[code_col].apply(clean_code) if code_col else ""
+    out["Нэр"] = df_raw[name_col].astype(str).str.strip() if name_col else ""
+    out["Өглөө"] = pd.to_numeric(df_raw[morning_col], errors="coerce").fillna(0.0) if morning_col else 0.0
+    out["Хүргэлт"] = pd.to_numeric(df_raw[delivery_col], errors="coerce").fillna(0.0) if delivery_col else 0.0
+    out["Орой"] = pd.to_numeric(df_raw[evening_col], errors="coerce").fillna(0.0) if evening_col else 0.0
+    out["Тайлбар"] = df_raw[note_col].astype(str).str.strip() if note_col else ""
+    out["Тайлбар"] = out["Тайлбар"].replace({"nan": "", "None": ""})
+
+    if name_col:
+        out["Нэр"] = out["Нэр"].replace({"nan": "", "None": ""})
+        out = out[out["Нэр"].str.strip() != ""]
+    elif code_col:
+        out = out[out["Код"].str.strip() != ""]
+
+    if out.empty:
+        raise ValueError(
+            "Тооллогын мөр олдсонгүй. Файл дэд-нийлбэрийн мөр л агуулсан "
+            "эсвэл багана буруу таарсан байж болзошгүй."
+        )
+
+    # Ижил Код+Нэр давхар мөрөөр орж ирвэл нэгтгэж нэмнэ (Тайлбарыг эхнийхээр нь авна).
+    agg = {"Өглөө": "sum", "Хүргэлт": "sum", "Орой": "sum", "Тайлбар": "first"}
+    out = out.groupby(["Код", "Нэр"], as_index=False).agg(agg)
+    return out[["Код", "Нэр", "Өглөө", "Хүргэлт", "Орой", "Тайлбар"]]
+
+
 def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame, fuzzy_threshold: int) -> pd.DataFrame:
     """
     Код-оор эхлээд тулгана, олдохгүй бол Fuzzy search-ээр нэрээр тулгана.
@@ -453,6 +512,39 @@ with tab1:
 
     master_df = load_master()
     code_to_name = dict(zip(master_df["Код"], master_df["Нэр"])) if not master_df.empty else {}
+
+    with st.expander("📥 Тооллогын Excel файлаас оруулах (гараар бичихийн оронд)", expanded=False):
+        st.caption(
+            "Файл нь `Код`/`Нэр` (аль нэг нь заавал) болон `Өглөө`, `Хүргэлт`(Орлого), "
+            "`Орой` баганын аль нэгийг агуулсан байх ёстой. `Тайлбар` багана заавал биш."
+        )
+        count_file = st.file_uploader(
+            "Тооллого хийсэн Excel файл", type=["xlsx", "xls"], key="count_upload"
+        )
+        if count_file is not None:
+            try:
+                df_count_uploaded = parse_count_excel(count_file)
+                st.success(f"Тооллогын файлаас {len(df_count_uploaded)} мөр амжилттай уншлаа.")
+                st.dataframe(df_count_uploaded, use_container_width=True, hide_index=True)
+
+                load_mode = st.radio(
+                    "Одоогийн хүснэгттэй хэрхэн нэгтгэх вэ?",
+                    ["Солих (хуучныг устгаад орлуулна)", "Нэмэх (хуучин мөрний ард нэмнэ)"],
+                    horizontal=True,
+                )
+                if st.button("⬆️ Хүснэгтэд ачаалах", type="primary", use_container_width=True):
+                    if load_mode.startswith("Солих"):
+                        st.session_state.count_df = df_count_uploaded.reset_index(drop=True)
+                    else:
+                        st.session_state.count_df = pd.concat(
+                            [st.session_state.count_df, df_count_uploaded], ignore_index=True
+                        )
+                    st.session_state.reconciled_df = None
+                    st.session_state.unmatched_system_df = None
+                    st.success("Тооллогын хүснэгт шинэчлэгдлээ.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Файл уншихад алдаа гарлаа: {e}")
 
     st.caption("Мөр бүрт Өглөө / Хүргэлт (Орлого) / Орой-ийн тоог оруулна уу. "
                "Код бичихэд мастер жагсаалтад байгаа бол нэр автоматаар бөглөгдөнө. "

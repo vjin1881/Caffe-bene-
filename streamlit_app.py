@@ -41,6 +41,7 @@ import io
 import re
 import uuid
 import tempfile
+import base64
 from datetime import datetime, date
 
 try:
@@ -165,6 +166,24 @@ def save_master(df: pd.DataFrame):
 
 def empty_count_row():
     return {"Код": "", "Нэр": "", "Өглөө": 0.0, "Хүргэлт": 0.0, "Орой": 0.0, "Тайлбар": ""}
+
+
+MAX_IMAGE_MB = 5  # Нэг зургийн дээд хэмжээ (JSON файл хэт том болохоос сэргийлнэ)
+
+
+def uploaded_image_to_record(uploaded_img) -> dict:
+    """Upload хийсэн зургийг JSON-д хадгалахад тохиромжтой base64 dict болгоно."""
+    raw_bytes = uploaded_img.getvalue()
+    return {
+        "name": uploaded_img.name,
+        "mime": uploaded_img.type or "image/jpeg",
+        "data": base64.b64encode(raw_bytes).decode("ascii"),
+        "uploaded_at": datetime.now().isoformat(),
+    }
+
+
+def image_record_to_bytes(img_record: dict) -> bytes:
+    return base64.b64decode(img_record["data"])
 
 
 # =======================================================================================
@@ -474,6 +493,10 @@ if "count_df" not in st.session_state:
         else:
             st.session_state.count_df = pd.DataFrame([empty_count_row()])
 
+if "count_images" not in st.session_state:
+    saved_current = load_json(PATH_CURRENT, None)
+    st.session_state.count_images = (saved_current or {}).get("images", []) or []
+
 if "reconciled_df" not in st.session_state:
     st.session_state.reconciled_df = None
 
@@ -519,7 +542,7 @@ with tab1:
     master_df = load_master()
     code_to_name = dict(zip(master_df["Код"], master_df["Нэр"])) if not master_df.empty else {}
 
-    with st.expander("📥 Тооллогын Excel файлаас оруулах (гараар бичихийн оронд)", expanded=False):
+    with st.expander("📥 Тооллогын Excel файл болон зураг оруулах (гараар бичихийн оронд)", expanded=False):
         st.caption(
             "Файл нь `Код`/`Нэр` (аль нэг нь заавал) болон `Өглөө`, `Хүргэлт`(Орлого), "
             "`Орой` баганын аль нэгийг агуулсан байх ёстой. `Тайлбар` багана заавал биш."
@@ -551,6 +574,42 @@ with tab1:
                     st.rerun()
             except Exception as e:
                 st.error(f"Файл уншихад алдаа гарлаа: {e}")
+
+        st.divider()
+        st.write("**📷 Тооллогын нотолгоо зураг (жиших бэлэн бичсэн хуудас, дэлгэцийн зураг гэх мэт)**")
+        uploaded_imgs = st.file_uploader(
+            "Зураг нэмэх (олон зураг зэрэг сонгож болно)",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key="count_image_upload",
+        )
+        if uploaded_imgs:
+            existing_names = {img["name"] for img in st.session_state.count_images}
+            added = 0
+            for img in uploaded_imgs:
+                size_mb = len(img.getvalue()) / (1024 * 1024)
+                if size_mb > MAX_IMAGE_MB:
+                    st.error(f"'{img.name}' — {size_mb:.1f}MB, {MAX_IMAGE_MB}MB-с их тул алгасав.")
+                    continue
+                if img.name in existing_names:
+                    continue
+                st.session_state.count_images.append(uploaded_image_to_record(img))
+                added += 1
+            if added:
+                st.success(f"{added} зураг нэмэгдлээ.")
+                st.rerun()
+
+        if st.session_state.count_images:
+            st.caption(f"Хавсаргасан зураг ({len(st.session_state.count_images)}):")
+            img_cols = st.columns(4)
+            for idx, img_rec in enumerate(list(st.session_state.count_images)):
+                with img_cols[idx % 4]:
+                    st.image(image_record_to_bytes(img_rec), caption=img_rec["name"], use_container_width=True)
+                    if st.button("🗑️ Устгах", key=f"del_img_{idx}_{img_rec['name']}", use_container_width=True):
+                        st.session_state.count_images.pop(idx)
+                        st.rerun()
+        else:
+            st.caption("Одоогоор зураг хавсаргаагүй байна.")
 
     st.caption("Мөр бүрт Өглөө / Хүргэлт (Орлого) / Орой-ийн тоог оруулна уу. "
                "Код бичихэд мастер жагсаалтад байгаа бол нэр автоматаар бөглөгдөнө. "
@@ -602,21 +661,23 @@ with tab1:
             save_json(PATH_CURRENT, {
                 "date": count_date.strftime("%Y-%m-%d"),
                 "items": edited_df.to_dict(orient="records"),
+                "images": st.session_state.count_images,
                 "saved_at": datetime.now().isoformat(),
             })
-            st.success("Түр хадгаллаа. Дараа нэвтрэхэд энэ өгөгдөл сэргэнэ.")
+            st.success("Түр хадгаллаа (хүснэгт болон зураг). Дараа нэвтрэхэд энэ өгөгдөл сэргэнэ.")
     with col_save2:
         if not st.session_state.confirm_clear_table:
             if st.button("🗑️ Хүснэгтийг цэвэрлэх", use_container_width=True):
                 st.session_state.confirm_clear_table = True
                 st.rerun()
         else:
-            st.warning("Хүснэгтэд байгаа бүх өгөгдөл устна. Итгэлтэй байна уу?")
+            st.warning("Хүснэгт болон хавсаргасан зургууд бүгд устна. Итгэлтэй байна уу?")
             cc1, cc2 = st.columns(2)
             if cc1.button("✅ Тийм, цэвэрлэ", type="primary", use_container_width=True):
                 st.session_state.count_df = pd.DataFrame([empty_count_row()])
                 st.session_state.reconciled_df = None
                 st.session_state.unmatched_system_df = None
+                st.session_state.count_images = []
                 st.session_state.confirm_clear_table = False
                 st.rerun()
             if cc2.button("❌ Үгүй, болих", use_container_width=True):
@@ -673,15 +734,17 @@ with tab1:
                 "archived_at": datetime.now().isoformat(),
                 "items": rdf.to_dict(orient="records"),
                 "unmatched_system": unmatched_sys.to_dict(orient="records") if unmatched_sys is not None else [],
+                "images": st.session_state.count_images,
             }
             history.append(record)
             save_json(PATH_HISTORY, history)
 
             # Түр хадгалалтыг цэвэрлэх
-            save_json(PATH_CURRENT, {"date": "", "items": [], "saved_at": ""})
+            save_json(PATH_CURRENT, {"date": "", "items": [], "images": [], "saved_at": ""})
             st.session_state.count_df = pd.DataFrame([empty_count_row()])
             st.session_state.reconciled_df = None
             st.session_state.unmatched_system_df = None
+            st.session_state.count_images = []
             st.success(f"{count_date.strftime('%Y-%m-%d')} өдрийн тооллого архивлагдлаа!")
             st.rerun()
 
@@ -731,6 +794,18 @@ with tab2:
             if not unmatched_hist.empty:
                 with st.expander(f"⚠️ Тухайн өдөр тоолоогүй ч Системд зарагдсан бараа ({len(unmatched_hist)})"):
                     st.dataframe(unmatched_hist, use_container_width=True, hide_index=True)
+
+            hist_images = sel_record.get("images", [])
+            if hist_images:
+                with st.expander(f"📷 Хавсаргасан зураг ({len(hist_images)})", expanded=False):
+                    img_cols_hist = st.columns(4)
+                    for idx, img_rec in enumerate(hist_images):
+                        with img_cols_hist[idx % 4]:
+                            st.image(
+                                image_record_to_bytes(img_rec),
+                                caption=img_rec.get("name", ""),
+                                use_container_width=True,
+                            )
 
             c1, c2 = st.columns(2)
             with c1:

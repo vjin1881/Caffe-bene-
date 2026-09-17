@@ -135,32 +135,98 @@ def compute_actual(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def find_col(columns, keywords):
-    """Багана нэрсээс түлхүүр үгтэй тохирохыг хайх (том/жижиг үсэг үл хамаарна)."""
-    cols_lower = {c: str(c).lower() for c in columns}
-    for c, low in cols_lower.items():
-        for kw in keywords:
+def find_col(columns, keywords_priority):
+    """
+    Багана нэрсээс түлхүүр үгтэй тохирохыг хайх (том/жижиг үсэг үл хамаарна).
+    keywords_priority жагсаалтын эхний үг илүү өндөр давуу эрхтэй тул
+    ойролцоо утгатай баганууд (ж: "Item #" ба "Item Name") хооронд зөв ялгана.
+    """
+    cols_lower = {c: str(c).lower().strip() for c in columns}
+    for kw in keywords_priority:
+        for c, low in cols_lower.items():
             if kw in low:
                 return c
     return None
 
 
+def find_header_row(raw_df: pd.DataFrame, max_scan: int = 25) -> int:
+    """
+    Толгой мөр нь эхний мөрөнд байхгүй тохиолдол (ж: огноо мэдээлэл дээр нь бичсэн)
+    гарвал, эхний хэдэн мөрнөөс хамгийн олон түлхүүр үгтэй давхцсан мөрийг олж,
+    түүнийг толгой мөр гэж тооцно.
+    """
+    keywords = ["item", "qty", "sold", "код", "code", "id", "нэр", "name", "plu", "price", "cost"]
+    best_row, best_score = 0, -1
+    for i in range(min(max_scan, len(raw_df))):
+        row_vals = raw_df.iloc[i].fillna("").astype(str).str.lower().tolist()
+        score = sum(1 for v in row_vals for kw in keywords if kw in v)
+        if score > best_score:
+            best_score, best_row = score, i
+    return best_row
+
+
+def clean_code(val) -> str:
+    """Тоон код 465.0 маягаар унших асуудлыг засаж '465' болгоно."""
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", ""):
+        return ""
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+        return str(f)
+    except (ValueError, TypeError):
+        return s
+
+
 def parse_system_excel(uploaded_file) -> pd.DataFrame:
-    """Системийн Excel-ийг уншиж (Код, Нэр, Qty Sold) баганатай нормчилно."""
-    df_raw = pd.read_excel(uploaded_file, engine="openpyxl")
+    """
+    Системийн Excel-ийг уншиж (Код, Нэр, Систем) баганатай нормчилно.
+    - Толгой мөр өөр газар байх (ж: эхэнд огноо мөр) тохиолдлыг автоматаар илрүүлнэ.
+    - "Item #"/"Item Name" зэрэг ойролцоо нэртэй баганыг зөв ялгана.
+    - Дэд нийлбэр / хоосон мөрүүдийг (Нэр хоосон байдаг) шүүж хаяна.
+    - Ижил Код/Нэр давхар мөрөөр орж ирвэл (тайланд нэг бараа хэд хэдэн бүлэгт
+      гарч ирдэг) тоог нь нэгтгэж нэмнэ.
+    """
+    uploaded_file.seek(0)
+    raw = pd.read_excel(uploaded_file, engine="openpyxl", header=None)
+    header_row = find_header_row(raw)
+
+    uploaded_file.seek(0)
+    df_raw = pd.read_excel(uploaded_file, engine="openpyxl", header=header_row)
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
-    code_col = find_col(df_raw.columns, ["код", "code", "id", "plu"])
-    name_col = find_col(df_raw.columns, ["нэр", "name", "item", "бараа"])
-    qty_col = find_col(df_raw.columns, ["qty sold", "qty_sold", "sold", "тоо", "qty"])
+    code_col = find_col(df_raw.columns, ["item #", "item#", "код", "plu", "code", "id"])
+    name_col = find_col(df_raw.columns, ["item name", "нэр", "name", "бараа"])
+    qty_col = find_col(df_raw.columns, ["qty sold", "qty_sold", "тоо", "sold", "qty"])
 
     if qty_col is None:
-        raise ValueError("Excel файлд 'Qty Sold' (борлуулсан тоо) багана олдсонгүй.")
+        raise ValueError(
+            "Excel файлд 'Qty Sold' (борлуулсан тоо) багана олдсонгүй. "
+            "Файлын толгой мөрийг шалгана уу."
+        )
+    if name_col is None and code_col is None:
+        raise ValueError("Excel файлд Барааны Код эсвэл Нэр агуулсан багана олдсонгүй.")
 
     out = pd.DataFrame()
-    out["Код"] = df_raw[code_col].astype(str).str.strip() if code_col else ""
+    out["Код"] = df_raw[code_col].apply(clean_code) if code_col else ""
     out["Нэр"] = df_raw[name_col].astype(str).str.strip() if name_col else ""
-    out["Систем"] = pd.to_numeric(df_raw[qty_col], errors="coerce").fillna(0.0)
+    out["Систем"] = pd.to_numeric(df_raw[qty_col], errors="coerce")
+
+    # Дэд нийлбэр / хоосон (спэйсэр) мөрүүдийг хасах — эдгээрт Нэр хоосон байдаг
+    out["Нэр"] = out["Нэр"].replace({"nan": "", "None": ""})
+    out = out[out["Нэр"].str.strip() != ""]
+    out = out.dropna(subset=["Систем"])
+
+    if out.empty:
+        raise ValueError(
+            "Барааны мөр олдсонгүй. Excel файл дэд-нийлбэрийн мөр л агуулсан "
+            "эсвэл багана буруу таарсан байж болзошгүй."
+        )
+
+    # Нэг бараа тайланд хэд хэдэн бүлэгт (цаг/ангилал зэргээр) давхардаж
+    # гарч ирдэг тул Код+Нэрээр нь нэгтгэж, тоог нь нэмнэ.
+    out = out.groupby(["Код", "Нэр"], as_index=False)["Систем"].sum()
     return out
 
 

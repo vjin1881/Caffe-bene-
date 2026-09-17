@@ -343,10 +343,16 @@ def parse_count_excel(uploaded_file) -> pd.DataFrame:
     return out[["Код", "Нэр", "Өглөө", "Хүргэлт", "Орой", "Тайлбар"]]
 
 
-def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame, fuzzy_threshold: int) -> pd.DataFrame:
+def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame, fuzzy_threshold: int):
     """
     Код-оор эхлээд тулгана, олдохгүй бол Fuzzy search-ээр нэрээр тулгана.
     Зөрүү = Бодит - Систем
+
+    Буцаах утга: (df, unmatched_system_df) хос (tuple).
+    Санамж: unmatched_system_df-г df.attrs дотор ХАДГАЛАХГҮЙ — учир нь
+    pandas-ийн зарим хувилбарт (concat/astype) attrs дотор DataFrame байхад
+    "truth value of a DataFrame is ambiguous" гэсэн алдаа гарна. Тиймээс
+    тусад нь, энгийн tuple-ээр буцаана.
     """
     df = compute_actual(df_count)
 
@@ -407,10 +413,10 @@ def reconcile(df_count: pd.DataFrame, df_system: pd.DataFrame, fuzzy_threshold: 
             continue
         unmatched_rows.append({"Код": code, "Нэр": name, "Систем": r["Систем"]})
 
-    df.attrs["unmatched_system"] = pd.DataFrame(unmatched_rows) if unmatched_rows else pd.DataFrame(
+    unmatched_system_df = pd.DataFrame(unmatched_rows) if unmatched_rows else pd.DataFrame(
         columns=["Код", "Нэр", "Систем"]
     )
-    return df
+    return df, unmatched_system_df
 
 
 def color_diff(val):
@@ -637,9 +643,9 @@ with tab1:
             df_system = parse_system_excel(sys_file)
             st.success(f"Системийн файлаас {len(df_system)} мөр амжилттай уншлаа.")
             if st.button("⚖️ Тулгалт хийх", type="primary", use_container_width=True):
-                reconciled = reconcile(edited_df, df_system, fuzzy_threshold)
+                reconciled, unmatched_system_df = reconcile(edited_df, df_system, fuzzy_threshold)
                 st.session_state.reconciled_df = reconciled
-                st.session_state.unmatched_system_df = reconciled.attrs.get("unmatched_system")
+                st.session_state.unmatched_system_df = unmatched_system_df
         except Exception as e:
             st.error(f"Файл уншихад алдаа гарлаа: {e}")
 

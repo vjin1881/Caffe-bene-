@@ -388,20 +388,14 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name="Тайлан") -> bytes:
 # =======================================================================================
 if "count_df" not in st.session_state:
     saved_current = load_json(PATH_CURRENT, None)
+
     if saved_current and saved_current.get("items"):
+        # Түр хадгалсан тооллогыг сэргээнэ
         st.session_state.count_df = pd.DataFrame(saved_current["items"])
     else:
-        master_df = load_master()
-        if not master_df.empty:
-            rows = []
-            for _, r in master_df.iterrows():
-                row = empty_count_row()
-                row["Код"] = r["Код"]
-                row["Нэр"] = r["Нэр"]
-                rows.append(row)
-            st.session_state.count_df = pd.DataFrame(rows)
-        else:
-            st.session_state.count_df = pd.DataFrame([empty_count_row()])
+        # Шинээр эхлэх үед мастер жагсаалтын бүх барааг автоматаар
+        # оруулахгүй. Зөвхөн 1 хоосон мөрөөс эхэлнэ.
+        st.session_state.count_df = pd.DataFrame([empty_count_row()])
 
 if "reconciled_df" not in st.session_state:
     st.session_state.reconciled_df = None
@@ -529,8 +523,11 @@ with tab1:
             except Exception as e:
                 st.error(f"Файл уншихад алдаа гарлаа: {e}")
 
-    st.caption("Мөр бүрт Өглөө / Хүргэлт (Орлого) / Орой-ийн тоог оруулна уу. "
-               "Шинэ мөр нэмэхдээ хүснэгтийн доод хэсгийн **+** товч ашиглана.")
+    st.caption(
+        "Мөр бүрт Өглөө / Хүргэлт (Орлого) / Орой-ийн тоог оруулна уу. "
+        "Хүссэн хэмжээгээрээ мөр нэмж болно. Хүснэгтийн хамгийн доод хэсгийн **+** товчийг "
+        "эсвэл доорх **Мөр нэмэх** товчийг ашиглана уу."
+    )
 
     edited_df = st.data_editor(
         st.session_state.count_df,
@@ -540,15 +537,34 @@ with tab1:
         column_config={
             "Код": st.column_config.SelectboxColumn(
                 "Код (PLU)", options=code_options, required=False, width="small"
-            ) if code_options and len(code_options) > 1 else st.column_config.TextColumn("Код", width="small"),
+            ) if code_options and len(code_options) > 1
+            else st.column_config.TextColumn("Код", width="small"),
             "Нэр": st.column_config.TextColumn("Барааны нэр", width="medium"),
-            "Өглөө": st.column_config.NumberColumn("Өглөө (Ө)", min_value=0.0, step=1.0, format="%.1f"),
-            "Хүргэлт": st.column_config.NumberColumn("Хүргэлт/Орлого (Х)", min_value=0.0, step=1.0, format="%.1f"),
-            "Орой": st.column_config.NumberColumn("Орой (О)", min_value=0.0, step=1.0, format="%.1f"),
-            "Тайлбар": st.column_config.TextColumn("Тайлбар", width="large"),
+            "Өглөө": st.column_config.NumberColumn(
+                "Өглөө (Ө)", min_value=0.0, step=1.0, format="%.1f"
+            ),
+            "Хүргэлт": st.column_config.NumberColumn(
+                "Хүргэлт/Орлого (Х)", min_value=0.0, step=1.0, format="%.1f"
+            ),
+            "Орой": st.column_config.NumberColumn(
+                "Орой (О)", min_value=0.0, step=1.0, format="%.1f"
+            ),
+            "Тайлбар": st.column_config.TextColumn(
+                "Тайлбар", width="large"
+            ),
         },
         hide_index=True,
     )
+
+    # data_editor-ийн шинэ мөрүүд дээр None/NaN гарвал хоосон утга болгон хэвийн болгоно.
+    edited_df = edited_df.copy()
+    for text_col in ["Код", "Нэр", "Тайлбар"]:
+        if text_col in edited_df.columns:
+            edited_df[text_col] = edited_df[text_col].fillna("").astype(str)
+
+    for num_col in ["Өглөө", "Хүргэлт", "Орой"]:
+        if num_col in edited_df.columns:
+            edited_df[num_col] = pd.to_numeric(edited_df[num_col], errors="coerce").fillna(0.0)
 
     # Код сонговол нэрийг автоматаар бөглөх
     if not master_df.empty:
@@ -557,7 +573,44 @@ with tab1:
             if c and c in code_to_name:
                 edited_df.at[i, "Нэр"] = code_to_name[c]
 
+    # Одоогийн хүснэгтийг state-д хадгална
     st.session_state.count_df = edited_df
+
+    # Мөр нэмэх / хоосон мөрүүдийг цэвэрлэх
+    add_col, clean_col = st.columns([1, 1])
+
+    with add_col:
+        if st.button("➕ Мөр нэмэх", use_container_width=True, key="add_count_row"):
+            new_row = pd.DataFrame([empty_count_row()])
+            st.session_state.count_df = pd.concat(
+                [edited_df, new_row], ignore_index=True
+            )
+            st.rerun()
+
+    with clean_col:
+        if st.button("🧹 Хоосон мөрүүдийг цэвэрлэх", use_container_width=True, key="clean_count_rows"):
+            cleaned = edited_df.copy()
+            cleaned["Код"] = cleaned["Код"].fillna("").astype(str).str.strip()
+            cleaned["Нэр"] = cleaned["Нэр"].fillna("").astype(str).str.strip()
+
+            # Код, нэр, тоонууд, тайлбар бүгд хоосон мөрийг устгана.
+            non_empty_mask = (
+                (cleaned["Код"] != "") |
+                (cleaned["Нэр"] != "") |
+                (cleaned["Өглөө"] != 0) |
+                (cleaned["Хүргэлт"] != 0) |
+                (cleaned["Орой"] != 0) |
+                (cleaned["Тайлбар"].fillna("").astype(str).str.strip() != "")
+            )
+            cleaned = cleaned[non_empty_mask].reset_index(drop=True)
+
+            # Бүх мөрийг цэвэрлэсэн бол дахин 1 хоосон мөр үлдээнэ.
+            if cleaned.empty:
+                cleaned = pd.DataFrame([empty_count_row()])
+
+            st.session_state.count_df = cleaned
+            st.session_state.reconciled_df = None
+            st.rerun()
 
     calc_df = compute_actual(edited_df)
     total_actual = calc_df["Бодит"].sum()

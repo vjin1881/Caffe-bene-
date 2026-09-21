@@ -44,6 +44,8 @@ PATH_MASTER = os.path.join(DATA_DIR, "master_items.json")
 PATH_CURRENT = os.path.join(DATA_DIR, "inventory_current.json")
 PATH_HISTORY = os.path.join(DATA_DIR, "inventory_history.json")
 PATH_DELETED = os.path.join(DATA_DIR, "inventory_deleted.json")
+PATH_PHOTOS = os.path.join(DATA_DIR, "photos")
+os.makedirs(PATH_PHOTOS, exist_ok=True)
 
 FUZZY_THRESHOLD = 70  # Нэрээр тулгах босго оноо (0-100)
 
@@ -612,13 +614,37 @@ with tab1:
         d2.metric("Илүүдсэн барааны тоо", int((rdf["Зөрүү"] > 0).sum()))
         d3.metric("Тохирсон барааны тоо", int((rdf["Зөрүү"] == 0).sum()))
 
+        st.write("**📷 Нотлох баримт хавсаргах (заавал биш)**")
+        st.caption("Кассын хуудас, гар бичмэл тооллого гэх мэт зургуудыг энд хавсаргавал "
+                   "архивтай хамт хадгалагдана. Хэд хэдэн зураг зэрэг сонгож болно.")
+        evidence_photos = st.file_uploader(
+            "Зураг хавсаргах", type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True, key="evidence_photo_upload",
+        )
+
         if st.button("📦 Архивлах (Тулгалтыг баталгаажуулж хадгалах)", type="primary", use_container_width=True):
+            record_id = str(uuid.uuid4())
+
+            # Хавсаргасан зургуудыг диск дээр хадгалах
+            photo_paths = []
+            if evidence_photos:
+                record_photo_dir = os.path.join(PATH_PHOTOS, record_id)
+                os.makedirs(record_photo_dir, exist_ok=True)
+                for i, photo in enumerate(evidence_photos):
+                    ext = os.path.splitext(photo.name)[1] or ".jpg"
+                    fname = f"{i+1:02d}{ext}"
+                    fpath = os.path.join(record_photo_dir, fname)
+                    with open(fpath, "wb") as f:
+                        f.write(photo.getbuffer())
+                    photo_paths.append(fpath)
+
             history = load_json(PATH_HISTORY, [])
             record = {
-                "id": str(uuid.uuid4()),
+                "id": record_id,
                 "date": count_date.strftime("%Y-%m-%d"),
                 "archived_at": datetime.now().isoformat(),
                 "items": rdf.to_dict(orient="records"),
+                "photos": photo_paths,
             }
             history.append(record)
             save_json(PATH_HISTORY, history)
@@ -627,7 +653,8 @@ with tab1:
             save_json(PATH_CURRENT, {"date": "", "items": [], "saved_at": ""})
             st.session_state.count_df = pd.DataFrame([empty_count_row()])
             st.session_state.reconciled_df = None
-            st.success(f"{count_date.strftime('%Y-%m-%d')} өдрийн тооллого архивлагдлаа!")
+            st.success(f"{count_date.strftime('%Y-%m-%d')} өдрийн тооллого архивлагдлаа!"
+                       + (f" ({len(photo_paths)} зурагтай)" if photo_paths else ""))
             st.rerun()
 
 
@@ -671,6 +698,15 @@ with tab2:
                 st.dataframe(styled_table(rdf), use_container_width=True, hide_index=True)
             else:
                 st.dataframe(rdf, use_container_width=True, hide_index=True)
+
+            photo_paths = sel_record.get("photos", [])
+            existing_photos = [p for p in photo_paths if os.path.exists(p)]
+            if existing_photos:
+                st.write(f"**📷 Хавсаргасан зураг ({len(existing_photos)}):**")
+                photo_cols = st.columns(min(3, len(existing_photos)))
+                for i, p in enumerate(existing_photos):
+                    with photo_cols[i % len(photo_cols)]:
+                        st.image(p, use_container_width=True)
 
             c1, c2 = st.columns(2)
             with c1:

@@ -12,7 +12,8 @@
 
 v2-т зассан зүйлс:
     * Код багана Selectbox байсныг Text болгосон (мастерт байхгүй код оруулахад унадаг байсан)
-    * data_editor-ийн key-г цэвэрлэдэг болсон (ачаалсан өгөгдөл буцаж өөрчлөгдөх алдаа)
+    * data_editor-ийн key-г цэвэрлэдэг болсон (ачаалсан өгөгдөл буцаж өөрчлөгдөх алдаа,
+      мөр нэмэхэд шинэ мөр "алга болдог" алдаа)
     * Styler.applymap → .map (pandas 3 дээр унадаг байсан)
     * Тоон баганыг format хийхээс өмнө цэвэрлэдэг болсон
     * parse_system_excel — Код багана байхгүй үед эвдэрдэг байсныг зассан
@@ -161,7 +162,7 @@ def load_master() -> pd.DataFrame:
     for col in ["Код", "Нэр"]:
         if col not in df.columns:
             df[col] = ""
-        df[col] = clean_text(df[col])
+        df[col] = df[col].astype(str).replace({"nan": "", "None": ""}).str.strip()
     if "Үнэ" not in df.columns:
         df["Үнэ"] = 0.0
     df["Үнэ"] = pd.to_numeric(df["Үнэ"], errors="coerce").fillna(0.0)
@@ -170,27 +171,22 @@ def load_master() -> pd.DataFrame:
 
 
 def save_master(df: pd.DataFrame):
-    """
-    ЗАСВАР: өмнө нь код байгаа ч Нэр хоосон (NaN) байвал str(NaN) → "nan" гэсэн
-    ЛИТЕРАЛ текст шууд хадгалагддаг байсан (жишээ нь Excel-ээр багцаар оруулахад
-    Нэр багана зарим мөрөнд хоосон байвал). Мөн код нь pd.NA байвал str(pd.NA)
-    "<NA>" гэж хувирдаг тул хуучин "nan" эсрэх шалгалт үүнийг барьж чадахгүй байсан.
-    pd.isna()-г эхлээд ашигласнаар эх сурвалж (None/NaN/<NA>) харгалзахгүй зөв
-    цэвэрлэгдэнэ.
-    """
     records = []
     for _, r in df.iterrows():
-        code = clean_text_scalar(r.get("Код", ""))
-        if code == "":
+        code = str(r.get("Код", "")).strip()
+        if code == "" or code.lower() == "nan":
             continue
-        name = clean_text_scalar(r.get("Нэр", ""))
         try:
             price = float(pd.to_numeric(r.get("Үнэ", 0), errors="coerce"))
         except (TypeError, ValueError):
             price = 0.0
         if pd.isna(price):
             price = 0.0
-        records.append({"code": code, "name": name, "price": price})
+        records.append({
+            "code": code,
+            "name": str(r.get("Нэр", "")).strip(),
+            "price": price,
+        })
     save_json(PATH_MASTER, records)
 
 
@@ -199,38 +195,8 @@ def empty_count_row():
             "Орой": 0.0, "Хаягдал": 0.0, "Дотоод": 0.0, "Тайлбар": ""}
 
 
-def clean_text(s: pd.Series) -> pd.Series:
-    """
-    Ямар ч эх сурвалжаас ирсэн (JSON null → Python None, numpy NaN, pandas NA)
-    хоосон утгыг найдвартай "" болгож, цэвэр текст Series болгоно.
-
-    ЧУХАЛ (pandas 3.0 зан төлөв): pandas 3.0-аас хойш баганын өгөгдмөл төрөл нь
-    шинэ "str" dtype бөгөөд үүн дээр .astype(str) хийхэд NA утга нь текст "None"
-    эсвэл "nan" болж хувирдаггүй, харин NA хэвээрээ үлддэг (хуучин pandas дээр
-    object dtype-д astype(str) хийхэд None → 'None' болж хувирдаг байсантай
-    ЭСРЭГ зан төлөв). Иймд:
-        astype(str) → .replace({"None":"", "nan":""})   ❌ (NA арилдаггүй)
-    гэдэг хуучин дараалал ажиллахгүй болсон тул эхлээд .where(...)-ээр NA-г ""
-    болгож, ДАРАА нь string болгоно. Үүнийг цаг тухайд нь хийхгүй бол
-    st.data_editor / st.dataframe дээр тухайн нүдэнд шууд "None" гэсэн текст
-    (эсвэл "nan", "<NA>") харагддаг — өөрөөр хэлбэл БОДИТ бараа биш, зүгээр л
-    цэвэрлэгдээгүй хоосон утга байсан хэрэг.
-    """
-    s = s.where(s.notna(), "")
-    s = s.astype(str).replace({"nan": "", "None": "", "<NA>": "", "NaN": ""})
-    return s.str.strip()
-
-
-def clean_text_scalar(v) -> str:
-    """clean_text-ийн скаляр хувилбар (мөр тус бүрээр давтахад ашиглана)."""
-    if pd.isna(v):
-        return ""
-    s = str(v).strip()
-    return "" if s.lower() in ("nan", "none", "<na>") else s
-
-
 def ensure_count_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Хуучин хадгалсан өгөгдөлд шинэ багана байхгүй байвал нэмж, бүх NA/None-г цэвэрлэнэ."""
+    """Хуучин хадгалсан өгөгдөлд шинэ багана байхгүй байвал нэмж өгнө."""
     df = df.copy()
     for col in COUNT_COLS:
         if col not in df.columns:
@@ -238,7 +204,7 @@ def ensure_count_cols(df: pd.DataFrame) -> pd.DataFrame:
     for col in NUM_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     for col in ["Код", "Нэр", "Тайлбар"]:
-        df[col] = clean_text(df[col])
+        df[col] = df[col].astype(str).replace({"nan": "", "None": ""})
     return df[COUNT_COLS]
 
 
@@ -272,6 +238,18 @@ def show_image(path):
         st.image(path, use_container_width=True)
     except TypeError:
         st.image(path, use_column_width=True)
+
+
+def editor_height(n_rows: int, min_rows: int = 8, max_px: int = 900) -> int:
+    """
+    st.data_editor анхныхаараа зөвхөн ~5-6 мөр харуулаад дотроо гүйлгэдэг тул
+    (мөр олон бол хэрэглэгч "зөвхөн 5 мөр л харагдлаа" гэж андуурдаг) —
+    мөрийн тооноос хамааруулж өндрийг автоматаар тооцож, дотор нь гүйлгэх
+    шаардлагагүй болгоно. Хэт олон мөртэй бол max_px-д хүрээд гүйлгэдэг хэвээр.
+    """
+    row_px, header_px, padding_px = 35, 38, 3
+    rows_to_show = max(n_rows, min_rows)
+    return min(header_px + row_px * rows_to_show + padding_px, max_px)
 
 
 # =======================================================================================
@@ -315,10 +293,8 @@ def find_header_row(raw_df: pd.DataFrame, keywords, max_scan: int = 40) -> int:
 
 def clean_code(val) -> str:
     """Тоон код 465.0 маягаар унших асуудлыг засаж '465' болгоно."""
-    if pd.isna(val):  # None / np.nan / pd.NA бүгдийг барина (str(pd.NA)=="<NA>" тул шалгах хэрэгтэй)
-        return ""
     s = str(val).strip()
-    if s.lower() in ("nan", "none", "<na>", ""):
+    if s.lower() in ("nan", "none", ""):
         return ""
     try:
         f = float(s)
@@ -361,12 +337,14 @@ def parse_system_excel(uploaded_file) -> pd.DataFrame:
     out = pd.DataFrame({
         "Код": (df_raw[code_col].apply(clean_code) if code_col is not None
                 else pd.Series("", index=idx)),
-        "Нэр": (clean_text(df_raw[name_col]) if name_col is not None
+        "Нэр": (df_raw[name_col].astype(str).str.strip() if name_col is not None
                 else pd.Series("", index=idx)),
         "Систем": pd.to_numeric(df_raw[qty_col], errors="coerce"),
     })
 
     # --- Дэд нийлбэр / хоосон (спэйсэр) мөрүүдийг хасах ---
+    out["Нэр"] = out["Нэр"].replace({"nan": "", "None": ""}).str.strip()
+    out["Код"] = out["Код"].replace({"nan": "", "None": ""}).str.strip()
     out = out.dropna(subset=["Систем"])
 
     # Код багана байгаа бол дэд нийлбэрийн мөрөнд код байдаггүй тул
@@ -758,42 +736,9 @@ with tab1:
     price_map = (dict(zip(master_df["Код"], master_df["Үнэ"]))
                  if not master_df.empty else {})
 
-    c_date, c_carry, c_sync = st.columns([2, 2, 2])
+    c_date, c_carry = st.columns([2, 2])
     with c_date:
         count_date = st.date_input("Тооллогын огноо", value=date.today())
-
-    # ---------------------------------------------------------------------------
-    # Мастер санд шинээр нэмэгдсэн бараа тооллогын хүснэгтэд автоматаар ОРДОГГҮЙ.
-    # (Учир нь өмнөх өдөр "Түр хадгалах" дарсан бол дараагийн удаа тэр л Draft
-    # ачаалагддаг, мастер жагсаалт дахин уншигддаггүй.) Иймд шинэ бараагаа Барааны
-    # санд нэмсний дараа энэ товчоор одоогийн хүснэгтэд алдалгүй нэмж болно —
-    # аль хэдийн байгаа мөрийг хөндөхгүй.
-    # ---------------------------------------------------------------------------
-    with c_sync:
-        st.write("")
-        if st.button("🔁 Мастер жагсаалтаас шинэ бараа нэмэх", use_container_width=True,
-                     help="Барааны сан-д нэмсэн боловч одоогийн тооллогын хүснэгтэд "
-                          "ороогүй байгаа шинэ бараануудыг мөр болгон нэмнэ. Байгаа "
-                          "мөрийг өөрчлөхгүй."):
-            cur = ensure_count_cols(st.session_state.count_df)
-            existing_codes = set(cur["Код"]) - {""}
-            existing_names = set(cur["Нэр"]) - {""}
-            new_rows = []
-            for _, r in master_df.iterrows():
-                if r["Код"] in existing_codes or r["Нэр"] in existing_names:
-                    continue
-                row = empty_count_row()
-                row["Код"] = r["Код"]
-                row["Нэр"] = r["Нэр"]
-                new_rows.append(row)
-            if not new_rows:
-                flash("Мастер жагсаалтын бүх бараа аль хэдийн хүснэгтэд байна.", "ℹ️")
-                st.rerun()
-            else:
-                merged = pd.concat([cur, pd.DataFrame(new_rows)], ignore_index=True)
-                set_count_df(merged)
-                flash(f"Мастер жагсаалтаас {len(new_rows)} шинэ бараа нэмэгдлээ.", "🔁")
-                st.rerun()
 
     # ---------------------------------------------------------------------------
     # Өмнөх өдрийн Орой → өнөөдрийн Өглөө
@@ -905,11 +850,13 @@ with tab1:
                     def _text_col(sel):
                         if sel == NONE_OPT:
                             return pd.Series("", index=df_import.index)
-                        return clean_text(df_import[sel])
+                        return (df_import[sel].astype(str)
+                                .replace({"nan": "", "None": ""}).str.strip())
 
                     new_df = pd.DataFrame({
                         "Код": df_import[code_sel].apply(clean_code),
-                        "Нэр": clean_text(df_import[name_sel]),
+                        "Нэр": (df_import[name_sel].astype(str).str.strip()
+                                .replace({"nan": "", "None": ""})),
                         "Өглөө": _num_col(morning_sel),
                         "Хүргэлт": _num_col(delivery_sel),
                         "Орой": _num_col(evening_sel),
@@ -959,6 +906,7 @@ with tab1:
         base_df,
         num_rows="dynamic",
         use_container_width=True,
+        height=editor_height(len(base_df)),
         key="count_editor",
         column_config={
             "Код": st.column_config.TextColumn("Код (PLU)", width="small"),
@@ -972,19 +920,12 @@ with tab1:
         },
         hide_index=True,
     )
-
-    # "+" товчоор шинэ мөр нэмэхэд тухайн мөрийн бүх нүд түр зуур None байдаг тул
-    # data_editor-ийн грид "None" гэсэн текстийг шууд харуулчихдаг (жинхэнэ бараа биш,
-    # зүгээр л цэвэрлэгдээгүй хоосон мөр). Үүнийг илрүүлбэл нэн даруй цэвэрлээд
-    # rerun хийж, "None" харагдах мөчийг өөрөө нэг алхмаар засна.
-    had_blank_cells = edited_df[COUNT_COLS].isna().any().any() if not edited_df.empty else False
+    if len(base_df) > 20:
+        st.caption(f"📋 Нийт **{len(base_df)}** мөр ачаалагдсан байна "
+                   f"(доошоо гүйлгээд бүгдийг харах боломжтой).")
 
     edited_df = ensure_count_cols(edited_df)
     st.session_state.count_df = edited_df
-
-    if had_blank_cells:
-        st.session_state.pop("count_editor", None)
-        st.rerun()
 
     calc_df = compute_actual(edited_df)
 
@@ -1250,12 +1191,8 @@ with tab2:
                     month_df[c] = pd.to_numeric(month_df[c], errors="coerce")
 
             if "Зөрүү" in month_df.columns:
-                if "Код" not in month_df.columns:
-                    month_df["Код"] = ""
-                if "Нэр" not in month_df.columns:
-                    month_df["Нэр"] = ""
-                month_df["Код"] = clean_text(month_df["Код"])
-                month_df["Нэр"] = clean_text(month_df["Нэр"])
+                month_df["Код"] = month_df.get("Код", "").astype(str)
+                month_df["Нэр"] = month_df.get("Нэр", "").astype(str)
 
                 agg_spec = {}
                 for src, dst in [("Тооц.борл", "Тооц.борл"), ("Бодит", "Бодит"),
@@ -1376,7 +1313,7 @@ with tab3:
             else:
                 preview = pd.DataFrame({
                     "Код": df_bulk[code_col].apply(clean_code),
-                    "Нэр": clean_text(df_bulk[name_col]),
+                    "Нэр": df_bulk[name_col].astype(str).str.strip(),
                     "Үнэ": (pd.to_numeric(df_bulk[price_col], errors="coerce").fillna(0.0)
                             if price_col else 0.0),
                 })
@@ -1411,6 +1348,7 @@ with tab3:
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
+            height=editor_height(len(show_df)),
             key="master_editor",
             column_config={
                 "Код": st.column_config.TextColumn("Код (PLU)", width="small"),
@@ -1419,11 +1357,6 @@ with tab3:
                                                      step=100.0, format="%.0f"),
             },
         )
-
-        # Тайлбар: энд "+" товчоор шинэ мөр нэмэхэд тухайн мөр бөглөгдөх хүртэл
-        # "None" гэж харагдаж болзошгүй (Streamlit-ийн грид хоосон нүдийг ингэж
-        # үзүүлдэг зан төлөв) — энэ бол зөвхөн дүрслэлийн зүйл бөгөөд "Хадгалах"
-        # дарахад save_master() автоматаар хоосон код/нэрийг зөв цэвэрлэнэ.
 
         if st.button("💾 Өөрчлөлтийг хадгалах", type="primary", use_container_width=True):
             if search_q.strip():

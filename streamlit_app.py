@@ -371,7 +371,12 @@ def styled_table(df: pd.DataFrame, diff_col="Зөрүү"):
     view = df[cols] if cols else df
     sty = view.style
     if diff_col in view.columns:
-        sty = sty.applymap(color_diff, subset=[diff_col])
+        # pandas 2.1-с "applymap" нэрийг "map" болгож сольсон бөгөөд хамгийн
+        # шинэ хувилбаруудад "applymap" бүрмөсөн устсан тул хоёуланг нь дэмжинэ.
+        if hasattr(sty, "map"):
+            sty = sty.map(color_diff, subset=[diff_col])
+        else:
+            sty = sty.applymap(color_diff, subset=[diff_col])
     fmt = {c: "{:.1f}" for c in ["Өглөө", "Хүргэлт", "Орой", "Бодит", "Систем", "Зөрүү"] if c in view.columns}
     sty = sty.format(fmt)
     return sty
